@@ -23,7 +23,7 @@ def _swear_note() -> str:
 
 # Добавляется к промпту, пока у Юли рабочее время (Пн-Пт, WORK_START–WORK_END по МСК)
 WORK_NOTE = (
-    " Сейчас рабочее время: ты на работе, сидишь, немного устала. "
+    " Ты сейчас на работе, сидишь, немного устала. "
     "Отвечай на вопрос собеседника по смыслу, как живой человек, и можешь вскользь упомянуть, "
     "что на работе. Например, на «как дела» ответь что-то вроде «Да нормально, на работе сижу, "
     "устала уже». НЕ пиши «освобожусь после 8» просто так. Говори это только если "
@@ -82,28 +82,46 @@ def enabled() -> bool:
     return bool(config.OPENAI_API_KEY)
 
 
+WEEKDAYS = ("понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье")
+
+
+def schedule_status(now: datetime) -> tuple[bool, str]:
+    """Возвращает (на_работе, факт_для_ИИ) по московскому времени `now`.
+
+    Модель сама не знает ни дня недели, ни времени, поэтому ей каждый раз сообщается готовый
+    факт — иначе она придумывает («сегодня суббота, выходной» в понедельник)."""
+    work_start = int(getattr(config, "WORK_START", 10))
+    work_end = int(getattr(config, "WORK_END", 20))
+    weekday = now.weekday()  # 0 - Пн, 6 - Вс
+    head = (f"ТЕКУЩЕЕ ВРЕМЯ (факт, не придумывай другое): сегодня {WEEKDAYS[weekday]}, "
+            f"{now:%d.%m.%Y}, сейчас {now:%H:%M} по Москве. Твой график: пн-пт с "
+            f"{work_start}:00 до {work_end}:00, суббота и воскресенье выходные. ")
+    if weekday >= 5:
+        status = "Сегодня у тебя ВЫХОДНОЙ, ты не на работе."
+        on_work = False
+    elif work_start <= now.hour < work_end:
+        status = f"Сегодня будний день, сейчас ты НА РАБОТЕ (до {work_end}:00)."
+        on_work = True
+    elif now.hour < work_start:
+        status = f"Сегодня будний день, но смена ещё не началась (начинаешь в {work_start}:00), ты не на работе."
+        on_work = False
+    else:
+        status = "Сегодня будний день, но рабочий день уже закончился: ты освободилась и НЕ на работе."
+        on_work = False
+    tail = (" Называй только этот день и это время. Не говори, что сегодня выходной, если он будний, "
+            "и не говори, что ты на работе, если по расписанию это не так.")
+    return on_work, head + status + tail
+
+
 def check_work_schedule() -> bool:
-    """Проверяет, работает ли Юля сейчас (Пн-Пт, с 10 до 20 по МСК)"""
-    moscow_tz = pytz.timezone('Europe/Moscow')
-    now = datetime.now(moscow_tz)
-    current_hour = now.hour
-    weekday = now.weekday() # 0 - Пн, 6 - Вс
-
-    work_start = int(getattr(config, 'WORK_START', 10))
-    work_end = int(getattr(config, 'WORK_END', 20))
-
-    # Если будний день и время с 10 до 20 — она на работе
-    if weekday < 5:
-        if work_start <= current_hour < work_end:
-            return True
-            
-    return False
+    """Работает ли Юля сейчас (Пн-Пт, по умолчанию с 10 до 20 по МСК)."""
+    return schedule_status(datetime.now(pytz.timezone("Europe/Moscow")))[0]
 
 
 NO_WORK_NOTE = (
-    " ВАЖНО: в этом ответе вообще не упоминай работу, магазин и усталость, если собеседник "
-    "сам прямо об этом не спросил. Отвечай только про то, о чём он написал. Если же он сам "
-    "рассказывает про свою работу — смело поддерживай эту тему (см. правило про его рассказ)."
+    " ВАЖНО: в этом ответе сама не заговаривай про работу, магазин и усталость. Но если "
+    "собеседник спросил, где ты, чем занята, работаешь ли сегодня — ответь честно по расписанию "
+    "выше. Если он сам рассказывает про свою работу — смело поддерживай эту тему."
 )
 # Собеседник отвечает на вопрос Юли («А ты?») и рассказывает про СЕБЯ — Юля должна это понять
 LISTEN_NOTE = (
@@ -160,7 +178,7 @@ async def generate(tg_client, chat_id: int, limit: int = 6) -> str | None:
         messages = await tg_client.get_messages(chat_id, limit=max(20, limit))
 
         # Про работу — только иногда: не чаще пары раз за диалог и не в каждом ответе
-        on_work = check_work_schedule()
+        on_work, schedule_fact = schedule_status(datetime.now(pytz.timezone("Europe/Moscow")))
         mentions = _work_mentions(messages)
         if on_work and mentions < WORK_MENTION_LIMIT and random.random() < WORK_MENTION_CHANCE:
             work_note = WORK_NOTE
@@ -168,7 +186,7 @@ async def generate(tg_client, chat_id: int, limit: int = 6) -> str | None:
             work_note = NO_WORK_NOTE
         log.info("Упоминаний работы в последних сообщениях: %d, подсказка: %s",
                  mentions, "про работу" if work_note is WORK_NOTE else "без работы")
-        system_prompt = (config.AI_SYSTEM_PROMPT + work_note + FORWARD_NOTE + LISTEN_NOTE + TONE_NOTE
+        system_prompt = (config.AI_SYSTEM_PROMPT + " " + schedule_fact + work_note + FORWARD_NOTE + LISTEN_NOTE + TONE_NOTE
                          + _swear_note())
 
         messages = messages[:max(4, limit)]   # get_messages отдаёт от новых к старым

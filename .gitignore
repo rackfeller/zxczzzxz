@@ -1,9 +1,9 @@
-﻿node_modules/
+.env
+*.session
+*.session-journal
 venv/
 .venv/
 __pycache__/
-*.log
-*.db
-*.session
-*.session-journal
-.env
+*.pyc
+userbot.db
+userbot.log*
